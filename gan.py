@@ -15,8 +15,11 @@ import argparse
 import numpy as np
 from scipy.stats import norm
 import tensorflow as tf
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib import animation
+import operator
 import seaborn as sns
 
 sns.set(color_codes=True)
@@ -105,13 +108,15 @@ def optimizer(loss, var_list, initial_learning_rate):
 
 
 class GAN(object):
-    def __init__(self, data, gen, num_steps, batch_size, minibatch, log_every, anim_path):
+    def __init__(self, data, gen, num_steps, batch_size, minibatch, log_every, dest, disc_dest, anim_path):
         self.data = data
         self.gen = gen
         self.num_steps = num_steps
         self.batch_size = batch_size
         self.minibatch = minibatch
         self.log_every = log_every
+        self.dest = dest
+        self.disc_dest = disc_dest
         self.mlp_hidden_size = 4
         self.anim_path = anim_path
         self.anim_frames = []
@@ -133,6 +138,8 @@ class GAN(object):
             self.pre_input = tf.placeholder(tf.float32, shape=(self.batch_size, 1))
             self.pre_labels = tf.placeholder(tf.float32, shape=(self.batch_size, 1))
             D_pre = discriminator(self.pre_input, self.mlp_hidden_size, self.minibatch)
+           # print('\n D_pre ',D_pre)
+           # print('\n D_pre.getshape() ',D_pre.get_shape())
             self.pre_loss = tf.reduce_mean(tf.square(D_pre - self.pre_labels))
             self.pre_opt = optimizer(self.pre_loss, None, self.learning_rate)
 
@@ -150,8 +157,12 @@ class GAN(object):
         with tf.variable_scope('Disc') as scope:
             self.x = tf.placeholder(tf.float32, shape=(self.batch_size, 1))
             self.D1 = discriminator(self.x, self.mlp_hidden_size, self.minibatch)
+           # print('\n D1 ',self.D1)
+           # print('\n D1.get_shape() ',self.D1.get_shape())
             scope.reuse_variables()
             self.D2 = discriminator(self.G, self.mlp_hidden_size, self.minibatch)
+           # print('\n D2 ',self.D2)
+           # print('\n D2.get_shape() ',self.D2.get_shape())
 
         # Define the loss for discriminator and generator networks (see the original
         # paper for details), and create optimizers for both
@@ -183,7 +194,9 @@ class GAN(object):
             # copy weights from pre-training over to new D network
             for i, v in enumerate(self.d_params):
                 session.run(v.assign(self.weightsD[i]))
-
+            
+            list_loss_d = []
+            list_loss_g = []
             for step in xrange(self.num_steps):
                 # update discriminator
                 x = self.data.sample(self.batch_size)
@@ -192,25 +205,30 @@ class GAN(object):
                     self.x: np.reshape(x, (self.batch_size, 1)),
                     self.z: np.reshape(z, (self.batch_size, 1))
                 })
+                list_loss_d.append(loss_d)
 
                 # update generator
                 z = self.gen.sample(self.batch_size)
                 loss_g, _ = session.run([self.loss_g, self.opt_g], {
                     self.z: np.reshape(z, (self.batch_size, 1))
                 })
+                list_loss_g.append(loss_g)
 
                 if step % self.log_every == 0:
                     print('{}: {}\t{}'.format(step, loss_d, loss_g))
 
                 if self.anim_path:
                     self.anim_frames.append(self._samples(session))
+            
+            self._plot_loss(list_loss_d,list_loss_g)            
 
             if self.anim_path:
                 self._save_animation()
             else:
                 self._plot_distributions(session)
 
-    def _samples(self, session, num_points=10000, num_bins=100):
+
+    def _samples(self, session, num_points=10000, num_bins=100):            # num_points ???
         '''
         Return a tuple (db, pd, pg), where db is the current decision
         boundary, pd is a histogram of samples from the data distribution,
@@ -220,15 +238,17 @@ class GAN(object):
         bins = np.linspace(-self.gen.range, self.gen.range, num_bins)
 
         # decision boundary
-        db = np.zeros((num_points, 1))
-        for i in range(num_points // self.batch_size):
-            db[self.batch_size * i:self.batch_size * (i + 1)] = session.run(self.D1, {
-                self.x: np.reshape(
-                    xs[self.batch_size * i:self.batch_size * (i + 1)],
-                    (self.batch_size, 1)
-                )
-            })
-
+        db = np.zeros((num_points, 1))                     # default : batch_size = 12       # évalue le tensor D1 = discriminator(x,...)   ( shape = (12,1) )
+        for i in range(num_points // self.batch_size):                                       # partie entière de la division ( num_points / batch_size )
+            db[self.batch_size * i:self.batch_size * (i + 1)] = session.run(
+                    fetches=self.D1 , feed_dict={self.x : np.reshape(                        # db [ a : b ] <=> les lignes aième à bième sont modifiées  
+                                                                                             # ( => ici, toutes les lignes correspondant au ième batch )
+                    xs[self.batch_size * i:self.batch_size * (i + 1)], (self.batch_size, 1)  # vecteur colonne contenant les abscisses correspondant au batch i
+            )
+            })                                       # remplace les lignes de db correspondant au batch i par le résultat de l'opération D1 sur les abscisses du batch
+        print('db.shape',db.shape)
+        print('decision boundary : ',db)
+        
         # data distribution
         d = self.data.sample(num_points)
         pd, _ = np.histogram(d, bins=bins, density=True)
@@ -247,20 +267,36 @@ class GAN(object):
 
         return db, pd, pg
 
-    def _plot_distributions(self, session):
+
+    def _plot_distributions(self, session):  #
         db, pd, pg = self._samples(session)
         db_x = np.linspace(-self.gen.range, self.gen.range, len(db))
         p_x = np.linspace(-self.gen.range, self.gen.range, len(pd))
         f, ax = plt.subplots(1)
         ax.plot(db_x, db, label='decision boundary')
-        ax.set_ylim(0, 1)
         plt.plot(p_x, pd, label='real data')
+        plt.axis('tight')
         plt.plot(p_x, pg, label='generated data')
+        plt.axis('tight')
         plt.title('1D Generative Adversarial Network')
         plt.xlabel('Data values')
         plt.ylabel('Probability density')
         plt.legend()
-        plt.show()
+        plt.savefig(self.dest)             #show()
+
+    def _plot_loss(self,list_loss_d,list_loss_g):
+        absc = range(1,self.num_steps+1)
+        plt.plot(absc,list_loss_d,label='discriminator loss')
+        plt.axis('tight')
+        plt.plot(absc,list_loss_g,label='generator loss')
+        plt.axis('tight')
+        plt.plot(absc,map(operator.add,list_loss_g,list_loss_d),label='total loss')
+        plt.axis('tight')
+        plt.xlabel('steps')
+        plt.ylabel('loss')
+        plt.legend()
+        plt.savefig(self.disc_dest)
+
 
     def _save_animation(self):
         f, ax = plt.subplots(figsize=(6, 4))
@@ -321,6 +357,8 @@ def main(args):
         args.batch_size,
         args.minibatch,
         args.log_every,
+        args.dest,
+        args.disc_dest,
         args.anim
     )
     model.train()
@@ -336,6 +374,10 @@ def parse_args():
                         help='use minibatch discrimination')
     parser.add_argument('--log-every', type=int, default=10,
                         help='print loss after this many steps')
+    parser.add_argument('--dest', type=str, default='test.png',
+                        help='destination du graphe')
+    parser.add_argument('--disc-dest', type=str, default='testdisc.png',
+                        help='destination du graphe des losses du discriminateur')
     parser.add_argument('--anim', type=str, default=None,
                         help='name of the output animation file (default: none)')
     return parser.parse_args()
